@@ -65,3 +65,26 @@ def select_attribute_paths(df, fea_df, att):
 			case_df[att+"@"+str_v1+"->"+str_v2] = case_df[Constants.TARGET_CASE_IDX].isin(case_idxs).astype("int")
 	fea_df = fea_df.merge(case_df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
 	return fea_df
+
+def select_attribute_path_durations(df, fea_df, att):
+	'''
+	For an attribute att and two values v1, v2, compute duration from first occurence of v1 to last occurence of v2 in the case
+	-1 if does not happen
+	'''
+	case_df = df[Constants.TARGET_CASE_IDX].unique().to_frame()
+	df = df.merge(df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
+	df = df.query(Constants.TARGET_TIMESTAMP + "<" + Constants.TARGET_TIMESTAMP + "_y")
+	vals = df[att].unique().to_arrow().to_pylist()
+	for v1 in vals:
+		for v2 in vals:
+			tdf = df[df[att] == v1]
+			tdf = tdf[tdf[att+'_y'] == v2]
+			tdf = tdf.groupby(Constants.TARGET_CASE_IDX).agg({Constants.TARGET_TIMESTAMP: "min", Constants.TARGET_TIMESTAMP+"_y": "max"}).reset_index()
+			str_v1 = v1.encode('ascii',errors='ignore').decode('ascii').replace(" ","")
+			str_v2 = v2.encode('ascii',errors='ignore').decode('ascii').replace(" ","")
+			tdf["duration"+"@"+att+"@"+str_v1+"->"+str_v2] = tdf[Constants.TARGET_TIMESTAMP+"_y"] - tdf[Constants.TARGET_TIMESTAMP]
+			tdf = tdf.drop([Constants.TARGET_TIMESTAMP, Constants.TARGET_TIMESTAMP+"_y"], axis=1)
+			case_df = case_df.merge(tdf, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
+			case_df["duration"+"@"+att+"@"+str_v1+"->"+str_v2] = case_df["duration"+"@"+att+"@"+str_v1+"->"+str_v2].astype("int").fillna(-1)
+	fea_df = fea_df.merge(case_df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
+	return fea_df
