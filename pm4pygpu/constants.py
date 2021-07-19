@@ -21,3 +21,6 @@ class Constants:
 	CUSTOM_PREFIX = "custom_column"
 	TEMP_COLUMN_1 = "custom_column_temp_1"
 	TEMP_COLUMN_2 = "custom_column_temp_2"
+
+	TARGET_RESOURCE = "custom_column_resource"
+	TARGET_RESOURCE_IDX = "custom_column_resource_idx"

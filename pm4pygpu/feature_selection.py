@@ -153,3 +153,22 @@ def select_time_to_end_of_case(df, fea_df, att):
 			cdf["timeFromLast@"+att+"@"+str_val] = cdf["timeFromLast@"+att+"@"+str_val].astype("int").fillna(-1)
 	fea_df = fea_df.merge(cdf, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
 	return fea_df
+
+def select_attribute_combinations(df, fea_df, att1, att2):
+	'''
+	Select value combinations of two atrtibutes att1, att2, e.g. att1@att2=v1@v2
+	'''
+	cdf = df[Constants.TARGET_CASE_IDX].unique().to_frame()
+	vals1 = df[att1].unique().to_arrow().to_pylist()
+	vals2 = df[att2].unique().to_arrow().to_pylist()
+	for v1 in vals1:
+		for v2 in vals2:
+			if v1 is not None and v2 is not None:
+				val_df = df[df[att1].isin([v1])]
+				val_df = val_df[val_df[att2].isin([v2])]
+				case_idxs = val_df[Constants.TARGET_CASE_IDX].unique()
+				str_v1 = v1.encode('ascii',errors='ignore').decode('ascii').replace(" ","")
+				str_v2 = v2.encode('ascii',errors='ignore').decode('ascii').replace(" ","")
+				cdf[att1+"@"+att2+"="+str_v1+"@"+str_v2] = cdf[Constants.TARGET_CASE_IDX].isin(case_idxs).astype("int")
+	fea_df = fea_df.merge(cdf, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
+	return fea_df
