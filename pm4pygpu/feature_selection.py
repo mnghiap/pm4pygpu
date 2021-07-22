@@ -61,6 +61,32 @@ def select_num_events(df, fea_df, col_name="numEvents"):
 	fea_df = fea_df.merge(df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
 	return fea_df
 
+def select_attribute_directly_follows_paths(df, fea_df, att):
+	'''
+	For an attribute att and two values v1, v2, column value att@v1->v2=0 if no such directly-follow happens in the case, elsewhile = #occurences of directly-follows.
+	Assumption: df is sorted by case and timestamp as in format.py
+	'''
+	df = df.copy()
+	df = df.sort_values(by = [Constants.TARGET_CASE_IDX, Constants.TARGET_TIMESTAMP])
+	vals = df[att].unique().to_arrow().to_pylist()
+	att_numeric = att + '_numeric'
+	df[att_numeric] = df[att].astype('category').cat.codes
+	keys = df[att_numeric].to_arrow().to_pylist()
+	values = df[att].to_arrow().to_pylist()
+	att_dict = {key: value for key, value in zip(keys, values)}
+	df[Constants.TEMP_COLUMN_2] = df[att_numeric]
+	df = df.groupby(Constants.TARGET_CASE_IDX).apply_grouped(paths_udf, incols = [Constants.TEMP_COLUMN_2], outcols= {Constants.TEMP_COLUMN_1: np.int32})
+	for v1 in att_dict.keys():
+		for v2 in att_dict.keys():
+			ev_idxs = df.query(Constants.TEMP_COLUMN_1+"=="+str(v1)+" and "+Constants.TEMP_COLUMN_2+"=="+str(v2))[Constants.TARGET_EV_IDX].unique()
+			str_v1 = att_dict[v1].encode('ascii',errors='ignore').decode('ascii').replace(" ","")
+			str_v2 = att_dict[v2].encode('ascii',errors='ignore').decode('ascii').replace(" ","")
+			df[att+"@"+str_v1+"->"+str_v2] = df[Constants.TARGET_EV_IDX].isin(ev_idxs).astype("int")
+	df = df[[Constants.TARGET_CASE_IDX] + [att+"@"+v1+"->"+v2 for v1 in att_dict.values() for v2 in att_dict.values()]]
+	df = df.groupby(Constants.TARGET_CASE_IDX).sum().reset_index()
+	fea_df = fea_df.merge(df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
+	return fea_df
+
 def select_attribute_paths(df, fea_df, att):
 	'''
 	For an attribute att and two values v1, v2, column value att@v1->v2=0 if there is no path v1->v2 happens in the case, elsewhile = 1
@@ -171,4 +197,44 @@ def select_attribute_combinations(df, fea_df, att1, att2):
 				str_v2 = v2.encode('ascii',errors='ignore').decode('ascii').replace(" ","")
 				cdf[att1+"@"+att2+"="+str_v1+"@"+str_v2] = cdf[Constants.TARGET_CASE_IDX].isin(case_idxs).astype("int")
 	fea_df = fea_df.merge(cdf, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
+	return fea_df
+
+def select_num_cases_in_progress(df, fea_df, col_name="casesInProgress"):
+	'''
+	Select number of cases opened at the same time for each case
+	'''
+	cdf = df[Constants.TARGET_CASE_IDX].unique().to_frame()
+	cases_df = build_cases_df(df)
+	cases_df[Constants.TEMP_COLUMN_1] = 0
+	cases_df = cases_df.merge(cases_df, on=[Constants.TEMP_COLUMN_1], how="left", suffixes=('','_y'))
+	cases_df = cases_df.query(Constants.TARGET_TIMESTAMP+"<"+Constants.TARGET_TIMESTAMP+"_2_y and "+Constants.TARGET_TIMESTAMP+"_y <"+Constants.TARGET_TIMESTAMP+"_2")
+	cases_df = cases_df.groupby(Constants.TARGET_CASE_IDX).count().reset_index()[[Constants.TARGET_CASE_IDX, Constants.TARGET_TIMESTAMP]]
+	cdf = cdf.merge(cases_df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
+	cdf[Constants.TARGET_TIMESTAMP] = cdf[Constants.TARGET_TIMESTAMP].astype("int").fillna(0)
+	cdf = cdf.rename(columns={Constants.TARGET_TIMESTAMP: col_name})
+	fea_df = fea_df.merge(cdf, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
+	return fea_df
+
+def select_resource_workload_during_case(df, fea_df):
+	'''
+	Select workload of all resources OF A CASE during timeframe of that case, i.e. number of events performed from start to end in the case
+	Value is 0 if resource does not belong to the case.
+	'''
+	cases_df = build_cases_df(df)
+	cases = cases_df[Constants.TARGET_CASE_IDX].to_arrow().to_pylist()
+	start_time = cases_df[Constants.TARGET_TIMESTAMP].to_arrow().to_pylist()
+	start_time = {cases[i]: start_time[i] for i in range(len(start_time))}
+	end_time = cases_df[Constants.TARGET_TIMESTAMP+"_2"].to_arrow().to_pylist()
+	end_time = {cases[i]: end_time[i] for i in range(len(end_time))}
+	rdf = df[Constants.TARGET_RESOURCE].unique().to_frame()
+	for case in cases:
+		rsrc_in_case = df[df[Constants.TARGET_CASE_IDX] == case][Constants.TARGET_RESOURCE].unique().to_arrow().to_pylist()
+		cdf = df[df[Constants.TARGET_RESOURCE].astype("string").isin(rsrc_in_case)] 
+		cdf = df.query(Constants.TARGET_TIMESTAMP+">="+str(start_time[case])+" and "+Constants.TARGET_TIMESTAMP+"<="+str(end_time[case]))
+		cdf = cdf.groupby([Constants.TARGET_RESOURCE]).agg({Constants.TARGET_EV_IDX: "count"}).reset_index()
+		rdf = rdf.merge(cdf, on=[Constants.TARGET_RESOURCE], how='left', suffixes=('','_y'))
+		rdf = rdf.rename(columns = {Constants.TARGET_EV_IDX: case})
+	rdf = rdf.fillna(0)
+	rdf = rdf.T.reset_index().rename(columns={'index':Constants.TARGET_CASE_IDX})
+	fea_df = fea_df.merge(rdf, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
 	return fea_df
