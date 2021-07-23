@@ -76,6 +76,7 @@ def select_attribute_directly_follows_paths(df, fea_df, att):
 	att_dict = {key: value for key, value in zip(keys, values)}
 	df[Constants.TEMP_COLUMN_2] = df[att_numeric]
 	df = df.groupby(Constants.TARGET_CASE_IDX).apply_grouped(paths_udf, incols = [Constants.TEMP_COLUMN_2], outcols= {Constants.TEMP_COLUMN_1: np.int32})
+	df = df.query(Constants.TARGET_CASE_IDX+" == "+Constants.TARGET_PRE_CASE)
 	for v1 in att_dict.keys():
 		for v2 in att_dict.keys():
 			ev_idxs = df.query(Constants.TEMP_COLUMN_1+"=="+str(v1)+" and "+Constants.TEMP_COLUMN_2+"=="+str(v2))[Constants.TARGET_EV_IDX].unique()
