@@ -12,7 +12,7 @@ def get_variants_df(df):
 
 def filter_on_variants(df, allowed_variants):
 	vdf = get_variants_df(df)
-	vdf = vdf[vdf[Constants.TARGET_ACTIVITY].isin(varstrings)]
+	vdf = vdf[vdf[Constants.TARGET_ACTIVITY].isin(allowed_variants)]
 	return df[df[Constants.TARGET_CASE_IDX].isin(vdf[Constants.TARGET_CASE_IDX])]
 
 def get_variants(df, max_des_vars_num=sys.maxsize, return_list=False):
