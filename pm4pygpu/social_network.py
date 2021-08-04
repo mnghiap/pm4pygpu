@@ -2,6 +2,7 @@ from pm4pygpu.constants import Constants
 from pm4pygpu.dfg import paths_udf, get_frequency_dfg
 import numpy as np
 from scipy.stats import pearsonr
+from pm4pygpu.basic import num_cases
 
 def get_num_cases_of_resource(df):
     '''
@@ -15,7 +16,14 @@ def handover_graph(df):
     '''
     Return a handover of work graph with absolute frequency
     '''
-    return get_frequency_dfg(df, att=Constants.TARGET_RESOURCE)
+    df = df.copy()
+    rsrc = df[Constants.TARGET_RESOURCE].cat.categories.to_arrow().to_pylist()
+    rsrc = {i: rsrc[i] for i in range(len(rsrc))}
+    df = df.rename(columns = {Constants.TARGET_RESOURCE_IDX: Constants.TEMP_COLUMN_2})
+    df = df = df.groupby(Constants.TARGET_CASE_IDX).apply_grouped(paths_udf, incols=[Constants.TEMP_COLUMN_2], outcols={Constants.TEMP_COLUMN_1: np.uint32})
+    dfg = df.query(Constants.TARGET_CASE_IDX+" == "+Constants.TARGET_PRE_CASE).groupby([Constants.TEMP_COLUMN_1, Constants.TEMP_COLUMN_2]).agg({Constants.TARGET_CASE_IDX: "nunique"}).to_pandas().to_dict()
+    dfg = {(str(rsrc[x[0]]), str(rsrc[x[1]])): y for x, y in dfg.items()}
+    return dfg
 
 def average_handover_matrix(df):
     '''
@@ -48,13 +56,17 @@ def average_handover_matrix(df):
 
 def working_together_graph(df):
     '''
-    Find a graph indicating in how many cases two people work together
+    Find a graph indicating the working together metric of any two resources
+    Metric = joint cases/num of all cases
+    Key (r1, r2) not in graph -> r1 and r2 did not work together (metric = 0)
     '''
+    n_cases = num_cases(df)
     rdf = df[[Constants.TARGET_CASE_IDX, Constants.TARGET_RESOURCE]]
     mdf = df.merge(df, on=[Constants.TARGET_CASE_IDX], how='left', suffixes=("","_y"))
     mdf = mdf.groupby([Constants.TARGET_RESOURCE, Constants.TARGET_RESOURCE+"_y"]).agg({Constants.TARGET_CASE_IDX: "nunique"})
-    dfg = mdf.to_pandas().to_dict()[Constants.TARGET_CASE_IDX]
-    return dfg
+    mdf[Constants.TARGET_CASE_IDX] = mdf[Constants.TARGET_CASE_IDX]/n_cases 
+    g = mdf.to_pandas().to_dict()[Constants.TARGET_CASE_IDX]
+    return g
 
 def similar_activities_graph(df):
     '''
@@ -78,22 +90,27 @@ def similar_activities_graph(df):
 
 def subcontracting_graph(df):
     '''
-    Return a graph indicating for two resources, how many times res1 subcontracted work to r2
+    Subcontracting: r1 -> r2 -> r1 on three successive events in one case
+    Return a graph indicating for two resources r1 and r2 the subcontracting metric of r1 r2
+    Metric = number of subcontracting instances / number of all cases
+    Key (r1, r2) not in graph -> r1 never subcontracted work to r2
     '''
+    n_cases = num_cases(df)
     rdf = df.sort_values(by=[Constants.TARGET_CASE_IDX, Constants.TARGET_TIMESTAMP])
     rsrc = df[Constants.TARGET_RESOURCE].cat.categories.to_arrow().to_pylist()
     rsrc = {i: rsrc[i] for i in range(len(rsrc))}
     rdf = rdf.rename(columns={Constants.TARGET_RESOURCE_IDX:Constants.TEMP_COLUMN_2})
     rdf = rdf.groupby(Constants.TARGET_CASE_IDX).apply_grouped(paths_udf, incols = [Constants.TEMP_COLUMN_2], outcols= {Constants.TEMP_COLUMN_1: np.uint32})
-    min_ev_idxs = rdf.groupby(Constants.TARGET_CASE_IDX).agg({Constants.TARGET_EV_IDX: "min"})[Constants.TARGET_EV_IDX].unique()
-    rdf = rdf[~rdf[Constants.TARGET_EV_IDX].isin(min_ev_idxs)]
+    min_ev_idxs = rdf.groupby(Constants.TARGET_CASE_IDX).agg({Constants.TARGET_EV_CASE_MULT_ID: "min"})[Constants.TARGET_EV_CASE_MULT_ID].unique()
+    rdf = rdf[~rdf[Constants.TARGET_EV_CASE_MULT_ID].isin(min_ev_idxs)]
     rdf = rdf.rename(columns={Constants.TEMP_COLUMN_2: Constants.TARGET_RESOURCE_IDX})
     rdf = rdf.rename(columns={Constants.TEMP_COLUMN_1: Constants.TEMP_COLUMN_2})
     rdf = rdf.groupby(Constants.TARGET_CASE_IDX).apply_grouped(paths_udf, incols = [Constants.TEMP_COLUMN_2], outcols= {Constants.TEMP_COLUMN_1: np.uint32})
-    min_ev_idxs = rdf.groupby(Constants.TARGET_CASE_IDX).agg({Constants.TARGET_EV_IDX: "min"})[Constants.TARGET_EV_IDX].unique()
-    rdf = rdf[~rdf[Constants.TARGET_EV_IDX].isin(min_ev_idxs)]
-    rdf = rdf.query(Constants.TEMP_COLUMN_1+"=="+Constants.TARGET_RESOURCE_IDX+" and "+Constants.TEMP_COLUMN_1+" != "+Constants.TEMP_COLUMN_2)
-    rdf = rdf.groupby([Constants.TEMP_COLUMN_1, Constants.TEMP_COLUMN_2]).agg({Constants.TARGET_EV_IDX: "count"})
-    sub_g = rdf.to_pandas().to_dict()[Constants.TARGET_EV_IDX]
-    sub_g = {(str(rsrc[x[0]]), str(rsrc[x[1]])): int(y) for x, y in sub_g.items()}
+    min_ev_idxs = rdf.groupby(Constants.TARGET_CASE_IDX).agg({Constants.TARGET_EV_CASE_MULT_ID: "min"})[Constants.TARGET_EV_CASE_MULT_ID].unique()
+    rdf = rdf[~rdf[Constants.TARGET_EV_CASE_MULT_ID].isin(min_ev_idxs)]
+    rdf = rdf.query(Constants.TEMP_COLUMN_1+"=="+Constants.TARGET_RESOURCE_IDX)#+" and "+Constants.TEMP_COLUMN_1+" != "+Constants.TEMP_COLUMN_2)
+    rdf = rdf.groupby([Constants.TEMP_COLUMN_1, Constants.TEMP_COLUMN_2]).agg({Constants.TARGET_CASE_IDX: "nunique"})
+    rdf[Constants.TARGET_CASE_IDX] = rdf[Constants.TARGET_CASE_IDX]/n_cases
+    sub_g = rdf.to_pandas().to_dict()[Constants.TARGET_CASE_IDX]
+    sub_g = {(str(rsrc[x[0]]), str(rsrc[x[1]])): y for x, y in sub_g.items()}
     return sub_g

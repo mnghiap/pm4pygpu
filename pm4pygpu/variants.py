@@ -1,6 +1,7 @@
 from pm4pygpu.constants import Constants
 from pm4pygpu.start_end_activities import get_end_activities
 import sys
+import cudf
 
 def get_variants_df(df):
 	df = df.copy()

@@ -1,5 +1,7 @@
 from pm4pygpu.constants import Constants
-from pm4pygpu.cases_df import get_first_df, get_last_df
+from pm4pygpu.cases_df import get_first_df, get_last_df, build_cases_df
+from pm4pygpu.dfg import paths_udf
+import numpy as np
 
 def select_number_column(df, fea_df, col):
 	df = get_last_df(df.dropna(subset=[col]))[[Constants.TARGET_CASE_IDX, col]]
@@ -50,7 +52,7 @@ def select_case_duration(df, fea_df, col_name="caseDuration"):
 	Select case duration for each case.
 	'''
 	cases_df = build_cases_df(df)[[Constants.TARGET_CASE_IDX, Constants.CASE_DURATION]].rename(columns={Constants.CASE_DURATION: col_name})
-	fea_df = fea_df.merge(df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
+	fea_df = fea_df.merge(cases_df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
 	return fea_df
 
 def select_num_events(df, fea_df, col_name="numEvents"):
@@ -58,7 +60,7 @@ def select_num_events(df, fea_df, col_name="numEvents"):
 	Select number of events for each case.
 	'''
 	cases_df = build_cases_df(df)[[Constants.TARGET_CASE_IDX, Constants.TARGET_EV_IDX]].rename(columns={Constants.TARGET_EV_IDX: col_name})
-	fea_df = fea_df.merge(df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
+	fea_df = fea_df.merge(cases_df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
 	return fea_df
 
 def select_attribute_directly_follows_paths(df, fea_df, att):
@@ -90,7 +92,7 @@ def select_attribute_directly_follows_paths(df, fea_df, att):
 
 def select_attribute_paths(df, fea_df, att):
 	'''
-	For an attribute att and two values v1, v2, column value att@v1->v2=0 if there is no path v1->v2 happens in the case, elsewhile = 1
+	For an attribute att and two values v1, v2, column value att@v1->v2=0 if there is no such eventually-follows path happens in the case, elsewhile = 1
 	Assumption: df is sorted by case and timestamp as in format.py
 	'''
 	case_df = df[Constants.TARGET_CASE_IDX].unique().to_frame()
@@ -236,6 +238,8 @@ def select_resource_workload_during_case(df, fea_df):
 		rdf = rdf.merge(cdf, on=[Constants.TARGET_RESOURCE], how='left', suffixes=('','_y'))
 		rdf = rdf.rename(columns = {Constants.TARGET_EV_IDX: case})
 	rdf = rdf.fillna(0)
+	rdf.index = rdf[Constants.TARGET_RESOURCE]
+	rdf = rdf.drop([Constants.TARGET_RESOURCE], axis=1)
 	rdf = rdf.T.reset_index().rename(columns={'index':Constants.TARGET_CASE_IDX})
 	fea_df = fea_df.merge(rdf, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
 	return fea_df
