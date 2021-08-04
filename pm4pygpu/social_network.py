@@ -3,6 +3,7 @@ from pm4pygpu.dfg import paths_udf, get_frequency_dfg
 import numpy as np
 from scipy.stats import pearsonr
 from pm4pygpu.basic import num_cases
+from pm4pygpu.cases_df import build_cases_df
 
 def get_num_cases_of_resource(df):
     '''
@@ -14,14 +15,20 @@ def get_num_cases_of_resource(df):
 
 def handover_graph(df):
     '''
-    Return a handover of work graph with absolute frequency
+    Return a handover of work metric graph
+    Metric: number of handover occurences / (sum(len(case)-1) for all cases in log)
     '''
     df = df.copy()
     rsrc = df[Constants.TARGET_RESOURCE].cat.categories.to_arrow().to_pylist()
     rsrc = {i: rsrc[i] for i in range(len(rsrc))}
     df = df.rename(columns = {Constants.TARGET_RESOURCE_IDX: Constants.TEMP_COLUMN_2})
     df = df = df.groupby(Constants.TARGET_CASE_IDX).apply_grouped(paths_udf, incols=[Constants.TEMP_COLUMN_2], outcols={Constants.TEMP_COLUMN_1: np.uint32})
-    dfg = df.query(Constants.TARGET_CASE_IDX+" == "+Constants.TARGET_PRE_CASE).groupby([Constants.TEMP_COLUMN_1, Constants.TEMP_COLUMN_2]).agg({Constants.TARGET_CASE_IDX: "nunique"}).to_pandas().to_dict()
+    cases_df = build_cases_df(df)[[Constants.TARGET_CASE_IDX, Constants.TARGET_EV_IDX]]
+    dividend = cases_df[Constants.TARGET_EV_IDX].sum() - num_cases(df)
+    dfg = df.query(Constants.TARGET_CASE_IDX+" == "+Constants.TARGET_PRE_CASE).groupby([Constants.TEMP_COLUMN_1, Constants.TEMP_COLUMN_2]).agg({Constants.TARGET_EV_IDX: "count"})
+    if dividend > 0:
+        dfg[Constants.TARGET_EV_IDX] = dfg[Constants.TARGET_EV_IDX] / dividend
+    dfg = dfg.to_pandas().to_dict()[Constants.TARGET_EV_IDX]
     dfg = {(str(rsrc[x[0]]), str(rsrc[x[1]])): y for x, y in dfg.items()}
     return dfg
 
