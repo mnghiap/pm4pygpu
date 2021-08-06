@@ -19,12 +19,11 @@ def handover_graph(df):
     Metric: number of handover occurences / (sum(len(case)-1) for all cases in log)
     '''
     df = df.copy()
+    dividend = len(df) - num_cases(df)
     rsrc = df[Constants.TARGET_RESOURCE].cat.categories.to_arrow().to_pylist()
     rsrc = {i: rsrc[i] for i in range(len(rsrc))}
     df = df.rename(columns = {Constants.TARGET_RESOURCE_IDX: Constants.TEMP_COLUMN_2})
     df = df = df.groupby(Constants.TARGET_CASE_IDX).apply_grouped(paths_udf, incols=[Constants.TEMP_COLUMN_2], outcols={Constants.TEMP_COLUMN_1: np.uint32})
-    cases_df = build_cases_df(df)[[Constants.TARGET_CASE_IDX, Constants.TARGET_EV_IDX]]
-    dividend = cases_df[Constants.TARGET_EV_IDX].sum() - num_cases(df)
     dfg = df.query(Constants.TARGET_CASE_IDX+" == "+Constants.TARGET_PRE_CASE).groupby([Constants.TEMP_COLUMN_1, Constants.TEMP_COLUMN_2]).agg({Constants.TARGET_EV_IDX: "count"})
     if dividend > 0:
         dfg[Constants.TARGET_EV_IDX] = dfg[Constants.TARGET_EV_IDX] / dividend
@@ -108,8 +107,7 @@ def subcontracting_graph(df):
     rsrc = {i: rsrc[i] for i in range(len(rsrc))}
     rdf = rdf.rename(columns={Constants.TARGET_RESOURCE_IDX:Constants.TEMP_COLUMN_2})
     rdf = rdf.groupby(Constants.TARGET_CASE_IDX).apply_grouped(paths_udf, incols = [Constants.TEMP_COLUMN_2], outcols= {Constants.TEMP_COLUMN_1: np.uint32})
-    min_ev_idxs = rdf.groupby(Constants.TARGET_CASE_IDX).agg({Constants.TARGET_EV_CASE_MULT_ID: "min"})[Constants.TARGET_EV_CASE_MULT_ID].unique()
-    rdf = rdf[~rdf[Constants.TARGET_EV_CASE_MULT_ID].isin(min_ev_idxs)]
+    rdf = rdf.query(Constants.TARGET_CASE_IDX+"=="+Constants.TARGET_PRE_CASE)
     rdf = rdf.rename(columns={Constants.TEMP_COLUMN_2: Constants.TARGET_RESOURCE_IDX})
     rdf = rdf.rename(columns={Constants.TEMP_COLUMN_1: Constants.TEMP_COLUMN_2})
     rdf = rdf.groupby(Constants.TARGET_CASE_IDX).apply_grouped(paths_udf, incols = [Constants.TEMP_COLUMN_2], outcols= {Constants.TEMP_COLUMN_1: np.uint32})
