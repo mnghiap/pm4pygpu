@@ -8,8 +8,7 @@ def num_cases(df):
 	return int(df[Constants.TARGET_CASE_IDX].nunique())
 
 def num_variants(df):
-	var_df = get_variants_df(df)
-	var_df = var_df.groupby(Constants.TARGET_ACTIVITY).count()
+	var_df = get_variants_df(df)[Constants.TARGET_ACTIVITY].unique()
 	return int(len(var_df))
 
 def get_events_of_case(df, case_id):
