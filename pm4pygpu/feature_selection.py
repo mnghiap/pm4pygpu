@@ -35,7 +35,7 @@ def select_features(df, low_b_str=5, up_b_str=50):
 		if not col.startswith("custom_") and not col.startswith("index"):
 			if "object" in str(df[col].dtype):
 				nuniq = df[col].nunique()
-				if low_b_str <= nuniq <= up_b_str:
+				if low_b_str <= nuniq <= up_b_str and None not in df[col].unique().values_host:
 					list_columns.append(col)
 			elif "float" in str(df[col].dtype) or "int" in str(df[col].dtype):
 				filt_df_cases = df.dropna(subset=[col])[Constants.TARGET_CASE_IDX].nunique()
