@@ -34,9 +34,11 @@ def select_features(df, low_b_str=5, up_b_str=50):
 	for col in df.columns:
 		if not col.startswith("custom_") and not col.startswith("index"):
 			if "object" in str(df[col].dtype):
-				nuniq = df[col].nunique()
-				if low_b_str <= nuniq <= up_b_str and None not in df[col].unique().values_host:
-					list_columns.append(col)
+				df_col = df[[Constants.TARGET_CASE_IDX, col]].dropna(subset=[col])
+				if df_col[Constants.TARGET_CASE_IDX].nunique() == df_cases:
+					nuniq = df[col].nunique()
+					if low_b_str <= nuniq <= up_b_str:
+						list_columns.append(col)
 			elif "float" in str(df[col].dtype) or "int" in str(df[col].dtype):
 				filt_df_cases = df.dropna(subset=[col])[Constants.TARGET_CASE_IDX].nunique()
 				if df_cases == filt_df_cases:
@@ -46,22 +48,6 @@ def select_features(df, low_b_str=5, up_b_str=50):
 def get_automatic_features_df(df, low_b_str=5, up_b_str=50):
 	list_columns = select_features(df, low_b_str=low_b_str, up_b_str=up_b_str)
 	return get_features_df(df, list_columns)
-
-def select_case_duration(df, fea_df, col_name="caseDuration"):
-	'''
-	Select case duration for each case.
-	'''
-	cases_df = build_cases_df(df)[[Constants.TARGET_CASE_IDX, Constants.CASE_DURATION]].rename(columns={Constants.CASE_DURATION: col_name})
-	fea_df = fea_df.merge(cases_df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
-	return fea_df
-
-def select_num_events(df, fea_df, col_name="numEvents"):
-	'''
-	Select number of events for each case.
-	'''
-	cases_df = build_cases_df(df)[[Constants.TARGET_CASE_IDX, Constants.TARGET_EV_IDX]].rename(columns={Constants.TARGET_EV_IDX: col_name})
-	fea_df = fea_df.merge(cases_df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
-	return fea_df
 
 def select_attribute_directly_follows_paths(df, fea_df, att):
 	'''
@@ -88,6 +74,22 @@ def select_attribute_directly_follows_paths(df, fea_df, att):
 	df = df[[Constants.TARGET_CASE_IDX] + [att+"@"+v1+"->"+v2 for v1 in att_dict.values() for v2 in att_dict.values()]]
 	df = df.groupby(Constants.TARGET_CASE_IDX).sum().reset_index()
 	fea_df = fea_df.merge(df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
+	return fea_df
+
+def select_case_duration(df, fea_df, col_name="caseDuration"):
+	'''
+	Select case duration for each case.
+	'''
+	cases_df = build_cases_df(df)[[Constants.TARGET_CASE_IDX, Constants.CASE_DURATION]].rename(columns={Constants.CASE_DURATION: col_name})
+	fea_df = fea_df.merge(cases_df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
+	return fea_df
+
+def select_num_events(df, fea_df, col_name="numEvents"):
+	'''
+	Select number of events for each case.
+	'''
+	cases_df = build_cases_df(df)[[Constants.TARGET_CASE_IDX, Constants.TARGET_EV_IDX]].rename(columns={Constants.TARGET_EV_IDX: col_name})
+	fea_df = fea_df.merge(cases_df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
 	return fea_df
 
 def select_attribute_paths(df, fea_df, att):
@@ -202,19 +204,26 @@ def select_attribute_combinations(df, fea_df, att1, att2):
 	fea_df = fea_df.merge(cdf, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
 	return fea_df
 
+@cuda.jit
+def cases_in_progress_kernel(start_time, end_time, cip):
+    i = cuda.grid(1)
+    if i < len(start_time):
+        for j in range(len(end_time)):
+            if start_time[i] < end_time[j] and start_time[j] < end_time[i]:
+                cip[i] += 1
+
 def select_num_cases_in_progress(df, fea_df, col_name="casesInProgress"):
 	'''
 	Select number of cases opened at the same time for each case
 	'''
-	cdf = df[Constants.TARGET_CASE_IDX].unique().to_frame()
-	cases_df = build_cases_df(df)
-	cases_df[Constants.TEMP_COLUMN_1] = 0
-	cases_df = cases_df.merge(cases_df, on=[Constants.TEMP_COLUMN_1], how="left", suffixes=('','_y'))
-	cases_df = cases_df.query(Constants.TARGET_TIMESTAMP+"<"+Constants.TARGET_TIMESTAMP+"_2_y and "+Constants.TARGET_TIMESTAMP+"_y <"+Constants.TARGET_TIMESTAMP+"_2")
-	cases_df = cases_df.groupby(Constants.TARGET_CASE_IDX).count().reset_index()[[Constants.TARGET_CASE_IDX, Constants.TARGET_TIMESTAMP]]
-	cdf = cdf.merge(cases_df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
-	cdf[Constants.TARGET_TIMESTAMP] = cdf[Constants.TARGET_TIMESTAMP].astype("int").fillna(0)
-	cdf = cdf.rename(columns={Constants.TARGET_TIMESTAMP: col_name})
+	cdf = build_cases_df(df)
+	start_time = cdf[Constants.TARGET_TIMESTAMP].to_array()
+	end_time = cdf[Constants.TARGET_TIMESTAMP+"_2"].to_array()
+	cip = np.zeros(len(start_time))
+	cases_in_progress_kernel.forall(len(start_time))(start_time, end_time, cip)
+	cdf[col_name] = cip
+	cdf[col_name] = cdf[col_name].astype("uint32")
+	cdf = cdf[[Constants.TARGET_CASE_IDX, col_name]]
 	fea_df = fea_df.merge(cdf, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
 	return fea_df
 
