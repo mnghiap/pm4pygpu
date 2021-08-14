@@ -2,6 +2,7 @@ from pm4pygpu.constants import Constants
 from pm4pygpu.cases_df import get_first_df, get_last_df, build_cases_df
 from pm4pygpu.dfg import paths_udf
 import numpy as np
+import cudf
 
 def select_number_column(df, fea_df, col):
 	df = get_last_df(df.dropna(subset=[col]))[[Constants.TARGET_CASE_IDX, col]]
@@ -227,28 +228,42 @@ def select_num_cases_in_progress(df, fea_df, col_name="casesInProgress"):
 	fea_df = fea_df.merge(cdf, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
 	return fea_df
 
+@cuda.jit
+def resource_workload_kernel(start_time, end_time, resource_cases, resource_df, workload, resource):
+	idx = cuda.grid(1)
+	if idx < len(resource_cases):
+		case = resource_cases[idx]
+		for ev in range(resource_df.shape[0]):
+			if start_time[case] <= resource_df[ev][2] and resource_df[ev][2] <= end_time[case]:
+				workload[case][resource] += 1
+
 def select_resource_workload_during_case(df, fea_df):
 	'''
 	Select workload of all resources OF A CASE during timeframe of that case, i.e. number of events performed from start to end in the case
 	Value is 0 if resource does not belong to the case.
 	'''
-	cases_df = build_cases_df(df)
-	cases = cases_df[Constants.TARGET_CASE_IDX].to_arrow().to_pylist()
-	start_time = cases_df[Constants.TARGET_TIMESTAMP].to_arrow().to_pylist()
-	start_time = {cases[i]: start_time[i] for i in range(len(start_time))}
-	end_time = cases_df[Constants.TARGET_TIMESTAMP+"_2"].to_arrow().to_pylist()
-	end_time = {cases[i]: end_time[i] for i in range(len(end_time))}
-	rdf = df[Constants.TARGET_RESOURCE].unique().to_frame()
-	for case in cases:
-		rsrc_in_case = df[df[Constants.TARGET_CASE_IDX] == case][Constants.TARGET_RESOURCE].unique().to_arrow().to_pylist()
-		cdf = df[df[Constants.TARGET_RESOURCE].astype("string").isin(rsrc_in_case)] 
-		cdf = df.query(Constants.TARGET_TIMESTAMP+">="+str(start_time[case])+" and "+Constants.TARGET_TIMESTAMP+"<="+str(end_time[case]))
-		cdf = cdf.groupby([Constants.TARGET_RESOURCE]).agg({Constants.TARGET_EV_IDX: "count"}).reset_index()
-		rdf = rdf.merge(cdf, on=[Constants.TARGET_RESOURCE], how='left', suffixes=('','_y'))
-		rdf = rdf.rename(columns = {Constants.TARGET_EV_IDX: case})
-	rdf = rdf.fillna(0)
-	rdf.index = rdf[Constants.TARGET_RESOURCE]
-	rdf = rdf.drop([Constants.TARGET_RESOURCE], axis=1)
-	rdf = rdf.T.reset_index().rename(columns={'index':Constants.TARGET_CASE_IDX})
-	fea_df = fea_df.merge(rdf, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
+	cdf = build_cases_df(df).sort_values(Constants.TARGET_CASE_IDX)
+	rsrc = df[Constants.TARGET_RESOURCE].unique()
+	rsrc_codes = rsrc.cat.codes
+	rsrc_strings = rsrc.to_arrow().to_pylist()
+	rsrc_dict = {rsrc_codes[i]: rsrc_strings[i] for i in range(len(rsrc_codes))}
+	df = df[[Constants.TARGET_CASE_IDX, Constants.TARGET_RESOURCE_IDX, Constants.TARGET_TIMESTAMP]]
+	resources = df[Constants.TARGET_RESOURCE_IDX].unique().to_array()
+	cases = cdf[Constants.TARGET_CASE_IDX].to_array()
+	start_time = cdf[Constants.TARGET_TIMESTAMP].to_array()
+	end_time = cdf[Constants.TARGET_TIMESTAMP+"_2"].to_array()
+	workload = np.zeros((len(cdf), resources.shape[0])).astype("uint32")
+	for resource in resources:
+		resource_df = df[df[Constants.TARGET_RESOURCE_IDX] == resource]
+		resource_cases = resource_df[Constants.TARGET_CASE_IDX].unique().to_array()
+		resource_df = resource_df.as_gpu_matrix()
+		resource_workload_kernel.forall(len(cdf))(start_time, end_time, resource_cases, resource_df, workload, resource)
+	workload_df = cudf.DataFrame.from_records(workload).reset_index()
+	def name_mapper(col_name):
+		if col_name == "index":
+			return Constants.TARGET_CASE_IDX
+		else:
+			return "workload@" + rsrc_dict[col_name].encode('ascii',errors='ignore').decode('ascii').replace(" ","")
+	workload_df = workload_df.rename(columns=name_mapper)
+	fea_df = fea_df.merge(workload_df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
 	return fea_df
