@@ -186,23 +186,45 @@ def select_time_to_end_of_case(df, fea_df, att):
 	fea_df = fea_df.merge(cdf, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
 	return fea_df
 
+@cuda.jit
+def combinations_kernel(unique_combi_matrix, df_matrix, combi_case_matrix):
+	i, j = cuda.grid(2)
+	if i < combi_case_matrix.shape[0] and j < combi_case_matrix.shape[1]:
+		for ev in range(df_matrix.shape[0]):
+			if df_matrix[ev][2] == i and unique_combi_matrix[j][0] == df_matrix[ev][0] and unique_combi_matrix[j][1] == df_matrix[ev][1]:
+				combi_case_matrix[i][j] = 1
+
 def select_attribute_combinations(df, fea_df, att1, att2):
 	'''
 	Select value combinations of two atrtibutes att1, att2, e.g. att1@att2=v1@v2
+	Only for string columns
 	'''
-	cdf = df[Constants.TARGET_CASE_IDX].unique().to_frame()
-	vals1 = df[att1].unique().to_arrow().to_pylist()
-	vals2 = df[att2].unique().to_arrow().to_pylist()
-	for v1 in vals1:
-		for v2 in vals2:
-			if v1 is not None and v2 is not None:
-				val_df = df[df[att1].isin([v1])]
-				val_df = val_df[val_df[att2].isin([v2])]
-				case_idxs = val_df[Constants.TARGET_CASE_IDX].unique()
-				str_v1 = v1.encode('ascii',errors='ignore').decode('ascii').replace(" ","")
-				str_v2 = v2.encode('ascii',errors='ignore').decode('ascii').replace(" ","")
-				cdf[att1+"@"+att2+"="+str_v1+"@"+str_v2] = cdf[Constants.TARGET_CASE_IDX].isin(case_idxs).astype("int")
-	fea_df = fea_df.merge(cdf, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
+	df = df[[att1, att2, Constants.TARGET_CASE_IDX]].dropna(subset=[att1, att2])
+	df[att1+"_numeric"] = df[att1].astype("category").cat.codes
+	df[att2+"_numeric"] = df[att2].astype("category").cat.codes
+	att1_vals = df[att1].unique().astype("category").to_arrow().to_pylist()
+	att1_vals = [x.encode('ascii',errors='ignore').decode('ascii').replace(" ","") for x in att1_vals]
+	att1_codes = df[att1].unique().astype("category").cat.codes
+	att1_dict = {att1_codes[i]: att1_vals[i] for i in range(len(att1_vals))}
+	att2_vals = df[att2].unique().astype("category").to_arrow().to_pylist()
+	att2_vals = [x.encode('ascii',errors='ignore').decode('ascii').replace(" ","") for x in att2_vals]
+	att2_codes = df[att2].unique().astype("category").cat.codes
+	att2_dict = {att2_codes[i]: att2_vals[i] for i in range(len(att2_vals))}
+	df = df[[att1+"_numeric", att2+"_numeric", Constants.TARGET_CASE_IDX]]
+	combi_df = df.groupby([att1+"_numeric", att2+"_numeric"]).agg({Constants.TARGET_CASE_IDX: "count"})
+	unique_combi_matrix = combi_df.reset_index()[[att1+"_numeric", att2+"_numeric"]].as_gpu_matrix()
+	df_matrix = df.as_gpu_matrix()
+	combi_case_matrix = np.zeros((df[Constants.TARGET_CASE_IDX].nunique(), unique_combi_matrix.shape[0])).astype("int")
+	combinations_kernel[(combi_case_matrix.shape[0]//32 + 1, combi_case_matrix.shape[1]//32 + 1), (32,32)](unique_combi_matrix, df_matrix, combi_case_matrix)
+	combi_case_df = cudf.DataFrame.from_records(combi_case_matrix).reset_index()
+	def name_mapper(col_name):
+		if col_name == 'index':
+			return Constants.TARGET_CASE_IDX
+		else:
+			code1, code2 = unique_combi_matrix[col_name]
+			return att1+"_and_"+att2+"@"+att1_dict[code1]+"_and_"+att2_dict[code2]
+	combi_case_df = combi_case_df.rename(columns=name_mapper)
+	fea_df = fea_df.merge(combi_case_df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
 	return fea_df
 
 @cuda.jit
