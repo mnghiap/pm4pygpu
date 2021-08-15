@@ -50,6 +50,22 @@ def get_automatic_features_df(df, low_b_str=5, up_b_str=50):
 	list_columns = select_features(df, low_b_str=low_b_str, up_b_str=up_b_str)
 	return get_features_df(df, list_columns)
 
+def select_case_duration(df, fea_df, col_name="caseDuration"):
+	'''
+	Select case duration for each case.
+	'''
+	cases_df = build_cases_df(df)[[Constants.TARGET_CASE_IDX, Constants.CASE_DURATION]].rename(columns={Constants.CASE_DURATION: col_name})
+	fea_df = fea_df.merge(cases_df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
+	return fea_df
+
+def select_num_events(df, fea_df, col_name="numEvents"):
+	'''
+	Select number of events for each case.
+	'''
+	cases_df = build_cases_df(df)[[Constants.TARGET_CASE_IDX, Constants.TARGET_EV_IDX]].rename(columns={Constants.TARGET_EV_IDX: col_name})
+	fea_df = fea_df.merge(cases_df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
+	return fea_df
+
 def select_attribute_directly_follows_paths(df, fea_df, att):
 	'''
 	For an attribute att and two values v1, v2, column value att@v1->v2=0 if no such directly-follow happens in the case, elsewhile = #occurences of directly-follows.
@@ -75,22 +91,6 @@ def select_attribute_directly_follows_paths(df, fea_df, att):
 	df = df[[Constants.TARGET_CASE_IDX] + [att+"@"+v1+"->"+v2 for v1 in att_dict.values() for v2 in att_dict.values()]]
 	df = df.groupby(Constants.TARGET_CASE_IDX).sum().reset_index()
 	fea_df = fea_df.merge(df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
-	return fea_df
-
-def select_case_duration(df, fea_df, col_name="caseDuration"):
-	'''
-	Select case duration for each case.
-	'''
-	cases_df = build_cases_df(df)[[Constants.TARGET_CASE_IDX, Constants.CASE_DURATION]].rename(columns={Constants.CASE_DURATION: col_name})
-	fea_df = fea_df.merge(cases_df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
-	return fea_df
-
-def select_num_events(df, fea_df, col_name="numEvents"):
-	'''
-	Select number of events for each case.
-	'''
-	cases_df = build_cases_df(df)[[Constants.TARGET_CASE_IDX, Constants.TARGET_EV_IDX]].rename(columns={Constants.TARGET_EV_IDX: col_name})
-	fea_df = fea_df.merge(cases_df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
 	return fea_df
 
 def select_attribute_paths(df, fea_df, att):
@@ -162,7 +162,6 @@ def select_time_from_start_of_case(df, fea_df, att):
 	fea_df = fea_df.merge(cdf, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
 	return fea_df
 
-
 def select_time_to_end_of_case(df, fea_df, att):
 	'''
 	Given a value v of attribute att, compute the time to the end of case from first/last occurence of v.
@@ -188,11 +187,11 @@ def select_time_to_end_of_case(df, fea_df, att):
 
 @cuda.jit
 def combinations_kernel(unique_combi_matrix, df_matrix, combi_case_matrix):
-	i, j = cuda.grid(2)
-	if i < combi_case_matrix.shape[0] and j < combi_case_matrix.shape[1]:
-		for ev in range(df_matrix.shape[0]):
-			if df_matrix[ev][2] == i and unique_combi_matrix[j][0] == df_matrix[ev][0] and unique_combi_matrix[j][1] == df_matrix[ev][1]:
-				combi_case_matrix[i][j] = 1
+	i = cuda.grid(1)
+	if i < df_matrix.shape[0]:
+		for j in range(unique_combi_matrix.shape[0]):
+			if unique_combi_matrix[j][0] == df_matrix[i][0] and unique_combi_matrix[j][1] == df_matrix[i][1]:
+				combi_case_matrix[df_matrix[i][2]][j] = 1
 
 def select_attribute_combinations(df, fea_df, att1, att2):
 	'''
@@ -215,7 +214,7 @@ def select_attribute_combinations(df, fea_df, att1, att2):
 	unique_combi_matrix = combi_df.reset_index()[[att1+"_numeric", att2+"_numeric"]].as_gpu_matrix()
 	df_matrix = df.as_gpu_matrix()
 	combi_case_matrix = np.zeros((df[Constants.TARGET_CASE_IDX].nunique(), unique_combi_matrix.shape[0])).astype("int")
-	combinations_kernel[(combi_case_matrix.shape[0]//32 + 1, combi_case_matrix.shape[1]//32 + 1), (32,32)](unique_combi_matrix, df_matrix, combi_case_matrix)
+	combinations_kernel.forall(df_matrix.shape[0])(unique_combi_matrix, df_matrix, combi_case_matrix)
 	combi_case_df = cudf.DataFrame.from_records(combi_case_matrix).reset_index()
 	def name_mapper(col_name):
 		if col_name == 'index':
