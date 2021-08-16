@@ -66,53 +66,79 @@ def select_num_events(df, fea_df, col_name="numEvents"):
 	fea_df = fea_df.merge(cases_df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
 	return fea_df
 
+@cuda.jit
+def combinations_kernel(unique_combi_matrix, df_matrix, combi_case_matrix):
+	'''
+	This kernel computes whether a two-combination (attribute1 x attribute2) appears in a case
+	unique_combi_matrix (shape: num_combinations x 2): contains all unique 2-combinations in the log
+	df_matrix: (shape: num-events x 3): the df in numeric (category codes) forms. column 0 is attribute1, col 1 is attribute2, col 2 is case idx
+	combi_case_matrix (shape: num_cases x num_unique_combinations)
+	'''
+	i = cuda.grid(1)
+	if i < df_matrix.shape[0]:
+		for j in range(unique_combi_matrix.shape[0]):
+			if unique_combi_matrix[j][0] == df_matrix[i][0] and unique_combi_matrix[j][1] == df_matrix[i][1]:
+				combi_case_matrix[df_matrix[i][2]][j] = 1
+
 def select_attribute_directly_follows_paths(df, fea_df, att):
 	'''
-	For an attribute att and two values v1, v2, column value att@v1->v2=0 if no such directly-follow happens in the case, elsewhile = #occurences of directly-follows.
-	Assumption: df is sorted by case and timestamp as in format.py
+	For an attribute att and two values v1, v2, column value att_directly@v1->v2=0 if no such direct path happens in the case, elsewhile = 1
 	'''
-	df = df.copy()
+	df = df[[Constants.TARGET_CASE_IDX, Constants.TARGET_TIMESTAMP, att, Constants.TARGET_PRE_CASE]]
 	df = df.sort_values(by = [Constants.TARGET_CASE_IDX, Constants.TARGET_TIMESTAMP])
-	vals = df[att].unique().to_arrow().to_pylist()
 	att_numeric = att + '_numeric'
 	df[att_numeric] = df[att].astype('category').cat.codes
-	keys = df[att_numeric].to_arrow().to_pylist()
-	values = df[att].to_arrow().to_pylist()
-	att_dict = {key: value for key, value in zip(keys, values)}
+	att_codes = df[att_numeric].to_array()
+	att_vals = df[att].to_arrow().to_pylist()
+	att_dict = {key: value.encode('ascii',errors='ignore').decode('ascii').replace(" ","") for key, value in zip(att_codes, att_vals)}
 	df[Constants.TEMP_COLUMN_2] = df[att_numeric]
-	df = df.groupby(Constants.TARGET_CASE_IDX).apply_grouped(paths_udf, incols = [Constants.TEMP_COLUMN_2], outcols= {Constants.TEMP_COLUMN_1: np.int32})
+	df = df.groupby(Constants.TARGET_CASE_IDX).apply_grouped(paths_udf, incols = [Constants.TEMP_COLUMN_2], outcols= {Constants.TEMP_COLUMN_1: np.uint32})
+	num_cases = df[Constants.TARGET_CASE_IDX].nunique()
 	df = df.query(Constants.TARGET_CASE_IDX+" == "+Constants.TARGET_PRE_CASE)
-	for v1 in att_dict.keys():
-		for v2 in att_dict.keys():
-			ev_idxs = df.query(Constants.TEMP_COLUMN_1+"=="+str(v1)+" and "+Constants.TEMP_COLUMN_2+"=="+str(v2))[Constants.TARGET_EV_IDX].unique()
-			str_v1 = att_dict[v1].encode('ascii',errors='ignore').decode('ascii').replace(" ","")
-			str_v2 = att_dict[v2].encode('ascii',errors='ignore').decode('ascii').replace(" ","")
-			df[att+"@"+str_v1+"->"+str_v2] = df[Constants.TARGET_EV_IDX].isin(ev_idxs).astype("int")
-	df = df[[Constants.TARGET_CASE_IDX] + [att+"@"+v1+"->"+v2 for v1 in att_dict.values() for v2 in att_dict.values()]]
-	df = df.groupby(Constants.TARGET_CASE_IDX).sum().reset_index()
-	fea_df = fea_df.merge(df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
+	unique_paths_df = df.groupby([Constants.TEMP_COLUMN_1, Constants.TEMP_COLUMN_2]).agg({Constants.TARGET_CASE_IDX: "count"}).reset_index()
+	unique_paths_matrix = unique_paths_df[[Constants.TEMP_COLUMN_1, Constants.TEMP_COLUMN_2]].as_gpu_matrix()
+	paths_cases_matrix = df[[Constants.TEMP_COLUMN_1, Constants.TEMP_COLUMN_2, Constants.TARGET_CASE_IDX]].as_gpu_matrix()
+	paths_feature_cols_matrix = np.zeros((num_cases, unique_paths_matrix.shape[0])).astype("int")
+	combinations_kernel.forall(paths_cases_matrix.shape[0])(unique_paths_matrix, paths_cases_matrix, paths_feature_cols_matrix)
+	paths_cols_df = cudf.DataFrame.from_records(paths_feature_cols_matrix).reset_index()
+	def name_mapper(col_name):
+		if col_name == 'index':
+			return Constants.TARGET_CASE_IDX
+		else:
+			code1, code2 = unique_paths_matrix[col_name]
+			return att+"_directly@"+att_dict[code1]+"->"+att_dict[code2]
+	paths_cols_df = paths_cols_df.rename(columns=name_mapper)
+	fea_df = fea_df.merge(paths_cols_df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
 	return fea_df
 
-def select_attribute_paths(df, fea_df, att):
+def select_attribute_eventually_follows_paths(df, fea_df, att):
 	'''
-	For an attribute att and two values v1, v2, column value att@v1->v2=0 if there is no such eventually-follows path happens in the case, elsewhile = 1
-	Assumption: df is sorted by case and timestamp as in format.py
+	For an attribute att and two values v1, v2, column value att_eventually@v1->v2=0 if there is no such eventually-follows path happens in the case, elsewhile = 1
 	'''
-	case_df = df[Constants.TARGET_CASE_IDX].unique().to_frame()
+	df = df[[Constants.TARGET_CASE_IDX, Constants.TARGET_TIMESTAMP, att]]
+	num_cases = df[Constants.TARGET_CASE_IDX].nunique()
+	att_numeric = att + '_numeric'
+	df[att_numeric] = df[att].astype('category').cat.codes
+	att_codes = df[att_numeric].to_array()
+	att_vals = df[att].to_arrow().to_pylist()
+	att_dict = {key: value.encode('ascii',errors='ignore').decode('ascii').replace(" ","") for key, value in zip(att_codes, att_vals)}
 	df = df.merge(df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
 	df = df.query(Constants.TARGET_TIMESTAMP + "<" + Constants.TARGET_TIMESTAMP + "_y")
-	vals = df[att].unique().to_arrow().to_pylist()
-	for v1 in vals:
-		for v2 in vals:
-			if v1 is not None and v2 is not None:
-				#case_idxs = df.query(att+"=="+str(v1)+" and "+att+"_y=="+str(v2)+" and "+Constants.TARGET_TIMESTAMP+"<"+Constants.TARGET_TIMESTAMP+"_y")[Constants.TARGET_EV_IDX].unique()
-				tdf = df[df[att] == v1]
-				tdf = tdf[tdf[att+'_y'] == v2]
-				case_idxs = tdf[Constants.TARGET_CASE_IDX].unique()
-				str_v1 = v1.encode('ascii',errors='ignore').decode('ascii').replace(" ","")
-				str_v2 = v2.encode('ascii',errors='ignore').decode('ascii').replace(" ","")
-				case_df[att+"@"+str_v1+"->"+str_v2] = case_df[Constants.TARGET_CASE_IDX].isin(case_idxs).astype("int")
-	fea_df = fea_df.merge(case_df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
+	df = df.sort_values(by = [Constants.TARGET_CASE_IDX, Constants.TARGET_TIMESTAMP])
+	unique_paths_df = df.groupby([att_numeric, att_numeric+"_y"]).agg({Constants.TARGET_CASE_IDX: "count"}).reset_index()
+	unique_paths_matrix = unique_paths_df[[att_numeric, att_numeric+"_y"]].as_gpu_matrix()
+	paths_cases_matrix = df[[att_numeric, att_numeric+"_y", Constants.TARGET_CASE_IDX]].as_gpu_matrix()
+	paths_feature_cols_matrix = np.zeros((num_cases, unique_paths_matrix.shape[0])).astype("int")
+	combinations_kernel.forall(paths_cases_matrix.shape[0])(unique_paths_matrix, paths_cases_matrix, paths_feature_cols_matrix)
+	paths_cols_df = cudf.DataFrame.from_records(paths_feature_cols_matrix).reset_index()
+	def name_mapper(col_name):
+		if col_name == 'index':
+			return Constants.TARGET_CASE_IDX
+		else:
+			code1, code2 = unique_paths_matrix[col_name]
+			return att+"_eventually@"+att_dict[code1]+"->"+att_dict[code2]
+	paths_cols_df = paths_cols_df.rename(columns=name_mapper)
+	fea_df = fea_df.merge(paths_cols_df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
 	return fea_df
 
 def select_attribute_path_durations(df, fea_df, att):
@@ -185,14 +211,6 @@ def select_time_to_end_of_case(df, fea_df, att):
 	fea_df = fea_df.merge(cdf, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
 	return fea_df
 
-@cuda.jit
-def combinations_kernel(unique_combi_matrix, df_matrix, combi_case_matrix):
-	i = cuda.grid(1)
-	if i < df_matrix.shape[0]:
-		for j in range(unique_combi_matrix.shape[0]):
-			if unique_combi_matrix[j][0] == df_matrix[i][0] and unique_combi_matrix[j][1] == df_matrix[i][1]:
-				combi_case_matrix[df_matrix[i][2]][j] = 1
-
 def select_attribute_combinations(df, fea_df, att1, att2):
 	'''
 	Select value combinations of two atrtibutes att1, att2, e.g. att1@att2=v1@v2
@@ -228,8 +246,13 @@ def select_attribute_combinations(df, fea_df, att1, att2):
 
 @cuda.jit
 def cases_in_progress_kernel(start_time, end_time, cip):
-    i = cuda.grid(1)
-    if i < len(start_time):
+	'''
+	This kernel computes number of cases open during lead time of every case
+	start_time, end_time (1D array): start and end time of all cases
+	cip (1D array): cip[i] is number of cases open during lead time of case i
+	'''
+	i = cuda.grid(1)
+	if i < len(start_time):
         for j in range(len(end_time)):
             if start_time[i] < end_time[j] and start_time[j] < end_time[i]:
                 cip[i] += 1
@@ -251,6 +274,13 @@ def select_num_cases_in_progress(df, fea_df, col_name="casesInProgress"):
 
 @cuda.jit
 def resource_workload_kernel(start_time, end_time, resource_cases, resource_df, workload, resource):
+	'''
+	This kernel computes the workload of a resource in lead time of all its cases
+	start_time, end_time (1D arrays): start and end timestamp of all cases
+	resource_cases (1D array): cases that this resource appears in
+	resource_df (num_events x 3): df in numerical form: col0 is case idx, col1 is resource idx, col2 is timestamp
+	workload (num_cases x num_resources): workload[i][j] = workload of resource j during lead time of case i (if j apepars in i)
+	'''
 	idx = cuda.grid(1)
 	if idx < len(resource_cases):
 		case = resource_cases[idx]
