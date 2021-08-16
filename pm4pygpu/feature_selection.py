@@ -141,28 +141,49 @@ def select_attribute_eventually_follows_paths(df, fea_df, att):
 	fea_df = fea_df.merge(paths_cols_df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
 	return fea_df
 
-def select_attribute_path_durations(df, fea_df, att):
+@cuda.jit
+def path_durations_kernel(unique_paths_matrix, df_matrix, cases_paths_matrix):
+	'''
+	This kernel fills cases_paths_matrix with duration of eventually follows paths from the df
+	unique_paths_matrix (num_unique_paths x 2): Contains all unique (eventually follows) paths of the df
+	df_matrix (num_unique_paths_cases x 4): df in numerical form. Columns: path start value, path end value, case idx, path duration
+	cases_paths_matrix (num_cases x num_unique_paths): cases_paths_matrix[i][j] is duration of combination unique_paths_matrix[j] in the case [i]
+	'''
+	i = cuda.grid(1)
+	if i < df_matrix.shape[0]:
+		for j in range(unique_paths_matrix.shape[0]):
+			if unique_paths_matrix[j][0] == df_matrix[i][0] and unique_paths_matrix[j][1] == df_matrix[i][1]:
+				cases_paths_matrix[df_matrix[i][2]][j] = df_matrix[i][3]
+
+def select_attribute_eventually_path_durations(df, fea_df, att):
 	'''
 	For an attribute att and two values v1, v2, compute duration from first occurence of v1 to last occurence of v2 in the case
-	-1 if does not happen
+	default to 0 if the eventually-follows path v1 -> v2 is not in the case
 	'''
-	case_df = df[Constants.TARGET_CASE_IDX].unique().to_frame()
+	df = df[[Constants.TARGET_CASE_IDX, Constants.TARGET_TIMESTAMP, att]]
+	num_cases = df[Constants.TARGET_CASE_IDX].nunique()
+	df[att+"_numeric"] = df[att].astype("category").cat.codes
+	att_codes = df[att+"_numeric"].to_array()
+	att_vals = df[att].to_arrow().to_pylist()
+	att_dict = {key: value.encode('ascii',errors='ignore').decode('ascii').replace(" ","") for key, value in zip(att_codes, att_vals)}
 	df = df.merge(df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
 	df = df.query(Constants.TARGET_TIMESTAMP + "<" + Constants.TARGET_TIMESTAMP + "_y")
-	vals = df[att].unique().to_arrow().to_pylist()
-	for v1 in vals:
-		for v2 in vals:
-			if v1 is not None and v2 is not None:
-				tdf = df[df[att] == v1]
-				tdf = tdf[tdf[att+'_y'] == v2]
-				tdf = tdf.groupby(Constants.TARGET_CASE_IDX).agg({Constants.TARGET_TIMESTAMP: "min", Constants.TARGET_TIMESTAMP+"_y": "max"}).reset_index()
-				str_v1 = v1.encode('ascii',errors='ignore').decode('ascii').replace(" ","")
-				str_v2 = v2.encode('ascii',errors='ignore').decode('ascii').replace(" ","")
-				tdf["duration"+"@"+att+"@"+str_v1+"->"+str_v2] = tdf[Constants.TARGET_TIMESTAMP+"_y"] - tdf[Constants.TARGET_TIMESTAMP]
-				tdf = tdf.drop([Constants.TARGET_TIMESTAMP, Constants.TARGET_TIMESTAMP+"_y"], axis=1)
-				case_df = case_df.merge(tdf, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
-				case_df["duration"+"@"+att+"@"+str_v1+"->"+str_v2] = case_df["duration"+"@"+att+"@"+str_v1+"->"+str_v2].astype("int").fillna(-1)
-	fea_df = fea_df.merge(case_df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
+	unique_paths_df = df.groupby([att+"_numeric", att+"_numeric_y"]).agg({Constants.TARGET_CASE_IDX: "count"}).reset_index()
+	unique_paths_matrix = unique_paths_df[[att+"_numeric", att+"_numeric_y"]].as_gpu_matrix()
+	df = df.groupby([att+"_numeric", att+"_numeric_y", Constants.TARGET_CASE_IDX]).agg({Constants.TARGET_TIMESTAMP: "min", Constants.TARGET_TIMESTAMP+"_y": "max"}).reset_index()
+	df[Constants.TEMP_COLUMN_1] = df[Constants.TARGET_TIMESTAMP+"_y"] - df[Constants.TARGET_TIMESTAMP]
+	df_matrix = df[[att+"_numeric", att+"_numeric_y", Constants.TARGET_CASE_IDX, Constants.TEMP_COLUMN_1]].as_gpu_matrix()
+	cases_paths_matrix = np.zeros((num_cases, unique_paths_matrix.shape[0])).astype("int")
+	path_durations_kernel.forall(df_matrix.shape[0])(unique_paths_matrix, df_matrix, cases_paths_matrix)
+	path_durations_df = cudf.DataFrame.from_records(cases_paths_matrix).reset_index()
+	def name_mapper(col_name):
+		if col_name == 'index':
+			return Constants.TARGET_CASE_IDX
+		else:
+			code1, code2 = unique_paths_matrix[col_name]
+			return att+"_duration_eventually@"+att_dict[code1]+"->"+att_dict[code2]
+	path_durations_df = path_durations_df.rename(columns = name_mapper)
+	fea_df = fea_df.merge(path_durations_df, on=[Constants.TARGET_CASE_IDX], how="left", suffixes=('','_y'))
 	return fea_df
 
 def select_time_from_start_of_case(df, fea_df, att):
