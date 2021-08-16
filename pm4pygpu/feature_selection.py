@@ -3,6 +3,7 @@ from pm4pygpu.cases_df import get_first_df, get_last_df, build_cases_df
 from pm4pygpu.dfg import paths_udf
 import numpy as np
 import cudf
+from numba import cuda
 
 def select_number_column(df, fea_df, col):
 	df = get_last_df(df.dropna(subset=[col]))[[Constants.TARGET_CASE_IDX, col]]
@@ -274,9 +275,9 @@ def cases_in_progress_kernel(start_time, end_time, cip):
 	'''
 	i = cuda.grid(1)
 	if i < len(start_time):
-        for j in range(len(end_time)):
-            if start_time[i] < end_time[j] and start_time[j] < end_time[i]:
-                cip[i] += 1
+		for j in range(len(end_time)):
+			if start_time[i] < end_time[j] and start_time[j] < end_time[i]:
+				cip[i] += 1
 
 def select_num_cases_in_progress(df, fea_df, col_name="casesInProgress"):
 	'''
